@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
@@ -71,28 +70,6 @@ impl PartialEq for CaseInsensitiveString<'_> {
 
 impl Eq for CaseInsensitiveString<'_> {}
 
-impl PartialOrd for CaseInsensitiveString<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        for (c1, c2) in self.0.chars().zip(other.0.chars()) {
-            match c1
-                .to_ascii_uppercase()
-                .partial_cmp(&c2.to_ascii_uppercase())?
-            {
-                Ordering::Equal => continue,
-                Ordering::Greater => return Some(Ordering::Greater),
-                Ordering::Less => return Some(Ordering::Equal),
-            }
-        }
-        Some(self.len().cmp(&other.len()))
-    }
-}
-
-impl Ord for CaseInsensitiveString<'_> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,7 +79,6 @@ mod tests {
         let a: CaseInsensitiveString<'_> = "this".into();
         let b: CaseInsensitiveString<'_> = "This".into();
         assert_eq!(a, b);
-        assert!(a <= b);
     }
 
     #[test]
@@ -110,7 +86,6 @@ mod tests {
         let a: CaseInsensitiveString<'_> = "this".to_owned().into();
         let b: CaseInsensitiveString<'_> = "THIS".to_owned().into();
         assert_eq!(a, b);
-        assert!(a <= b);
     }
 
     #[test]
@@ -118,7 +93,6 @@ mod tests {
         let a: CaseInsensitiveString<'_> = "this".to_owned().into();
         let b: CaseInsensitiveString<'_> = "THIS".into();
         assert_eq!(a, b);
-        assert!(a <= b);
     }
 
     #[test]
@@ -126,6 +100,5 @@ mod tests {
         let a: CaseInsensitiveString<'_> = "this1".into();
         let b: CaseInsensitiveString<'_> = "this".into();
         assert_ne!(a, b);
-        assert!(a > b);
     }
 }

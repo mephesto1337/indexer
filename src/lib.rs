@@ -92,7 +92,6 @@ impl Document {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Index {
     documents: HashMap<PathBuf, Document>,
-    term_frequency: HashMap<CaseInsensitiveString<'static>, usize>,
 }
 
 macro_rules! apply_tokenizer {
@@ -102,13 +101,6 @@ macro_rules! apply_tokenizer {
         match Document::build(&p, tokenizer) {
             Ok(d) => {
                 eprintln!("INFO: processed {path}", path = p.display());
-                for term in d.term_frequency.keys() {
-                    if let Some(count) = $index.term_frequency.get_mut(term) {
-                        *count += 1;
-                    } else {
-                        $index.term_frequency.insert(term.clone(), 1);
-                    }
-                }
                 $index.documents.insert(p, d);
             }
             Err(e) => {
@@ -122,7 +114,6 @@ impl Index {
     pub fn new(p: impl AsRef<Path>) -> Self {
         let mut index = Self {
             documents: HashMap::new(),
-            term_frequency: HashMap::new(),
         };
         traverse_tree(p, |p| match p.extension().and_then(|e| e.to_str()) {
             Some("xhtml") | Some("xml") => apply_tokenizer!(XmlTokenizer::default(), p, index),
