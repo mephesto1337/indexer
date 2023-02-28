@@ -1,193 +1,111 @@
 use std::{
-    collections::{BTreeSet, HashMap},
-    fs::{read_dir, File},
+    fs::{metadata, File},
     io::{self, BufReader, BufWriter},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
-use serde::{Deserialize, Serialize};
+use clap::{Parser, Subcommand};
 
-mod case_insensitive_string;
-mod tokenizer;
+use indexer::Index;
 
-use case_insensitive_string::CaseInsensitiveString;
-use tokenizer::{TextTokenizer, Tokenizer, XmlTokenizer};
+#[derive(Debug, Parser)]
+#[command(author, version, about)]
+struct Options {
+    /// Index file to use
+    #[arg(
+        short = 'i',
+        long = "index",
+        value_name = "FILE",
+        default_value = "index.json"
+    )]
+    index_file: String,
 
-fn traverse_tree(p: impl AsRef<Path>, mut callback: impl FnMut(PathBuf)) {
-    let mut inodes = BTreeSet::new();
-    let mut to_visit = Vec::new();
-    to_visit.push(p.as_ref().to_path_buf());
+    #[command(subcommand)]
+    command: Command,
+}
 
-    while let Some(p) = to_visit.pop() {
-        let rd = match read_dir(&p) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("ERROR: cannot read {path}: {e}", path = p.display());
-                continue;
-            }
-        };
-        for entry in rd {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("ERROR: cannot process entry: {e}");
-                    continue;
-                }
-            };
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(e) => {
-                    eprintln!(
-                        "ERROR: cannot get filetype for {path}: {e}",
-                        path = entry.path().display()
-                    );
-                    continue;
-                }
-            };
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Build the index file if not present
+    Build {
+        /// Force rebuild
+        #[arg(short, long, default_value_t = false)]
+        force: bool,
 
-            if ft.is_dir() {
-                let path = entry.path();
-                let was_not_present = inodes.insert(path.clone());
-                if was_not_present {
-                    to_visit.push(path);
-                }
-            } else if ft.is_file() {
-                callback(entry.path());
+        /// Directory to index
+        #[arg(default_value = ".")]
+        directory: String,
+    },
+
+    /// search for terms
+    Search {
+        /// Maximum number of results to display
+        #[arg(short, long, default_value_t = 10)]
+        count: usize,
+
+        /// Query
+        query: String,
+    },
+}
+
+fn file_exists(path: impl AsRef<Path>) -> io::Result<bool> {
+    let path = path.as_ref();
+    match metadata(path) {
+        Ok(m) => {
+            if m.is_file() {
+                Ok(true)
+            } else if m.is_dir() {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("{p} points to a directory", p = path.display()),
+                ))
+            } else if m.is_symlink() {
+                unreachable!()
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("{p} points to an unknown type", p = path.display()),
+                ))
             }
         }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Document {
-    term_frequency: HashMap<CaseInsensitiveString<'static>, usize>,
-    count: usize,
-}
-
-impl Document {
-    pub fn build<P: AsRef<Path>>(filename: P, mut tokenizer: impl Tokenizer) -> io::Result<Self> {
-        let mut file = BufReader::new(File::open(filename)?);
-        let mut term_frequency = HashMap::new();
-
-        let count = tokenizer.tokenize(&mut file, &mut term_frequency)?;
-
-        Ok(Self {
-            term_frequency,
-            count,
-        })
-    }
-
-    pub fn term_frequency(&self, term: &str) -> f64 {
-        match self.term_frequency.get(&term.into()) {
-            Some(c) => *c as f64 / self.count as f64,
-            None => 0f64,
-        }
-    }
-
-    pub fn contains(&self, term: &str) -> bool {
-        self.term_frequency.contains_key(&term.into())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Index {
-    documents: HashMap<PathBuf, Document>,
-    term_frequency: HashMap<CaseInsensitiveString<'static>, usize>,
-}
-
-macro_rules! apply_tokenizer {
-    ($tokenizer:expr, $path:ident, $index:ident) => {{
-        let tokenizer = $tokenizer;
-        let p = $path;
-        match Document::build(&p, tokenizer) {
-            Ok(d) => {
-                eprintln!("INFO: processed {path}", path = p.display());
-                for term in d.term_frequency.keys() {
-                    if let Some(count) = $index.term_frequency.get_mut(term) {
-                        *count += 1;
-                    } else {
-                        $index.term_frequency.insert(term.clone(), 1);
-                    }
-                }
-                $index.documents.insert(p, d);
-            }
-            Err(e) => {
-                eprintln!("ERROR: processing {path}: {e}", path = p.display());
+        Err(e) => {
+            if e.kind() == io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(e)
             }
         }
-    }};
-}
-
-impl Index {
-    pub fn new(p: impl AsRef<Path>) -> Self {
-        let mut index = Self {
-            documents: HashMap::new(),
-            term_frequency: HashMap::new(),
-        };
-        traverse_tree(p, |p| match p.extension().and_then(|e| e.to_str()) {
-            Some("xhtml") | Some("xml") => apply_tokenizer!(XmlTokenizer::default(), p, index),
-            Some("text") | Some("txt") => apply_tokenizer!(TextTokenizer::default(), p, index),
-            Some(ext) => {
-                eprintln!("No handler for {ext:?} documents");
-            }
-            None => {
-                eprintln!("Unknown document type {path}", path = p.display());
-            }
-        });
-        index
-    }
-
-    fn idf(&self, term: &str) -> f64 {
-        let n = self.documents.len() as f64;
-        let d = self.documents.values().filter(|d| d.contains(term)).count() as f64;
-        assert!(n >= d);
-        (n / (d + 1f64)).log10()
-    }
-
-    pub fn search<'a>(&'a self, terms: &'_ str) -> Vec<(&'a Path, f64)> {
-        let terms = tokenizer::Lexer::new(terms)
-            .map(|t| (t, self.idf(t)))
-            .collect::<Vec<_>>();
-        let mut results: Vec<_> = self
-            .documents
-            .iter()
-            .map(move |(filename, d)| {
-                (
-                    filename.as_path(),
-                    terms
-                        .iter()
-                        .map(|(t, idf)| {
-                            let tf = d.term_frequency(t);
-                            tf * *idf
-                        })
-                        .sum::<f64>(),
-                )
-            })
-            .collect();
-        results.sort_by(|(_, score1), (_, score2)| score1.partial_cmp(score2).unwrap());
-        results.reverse();
-        results
     }
 }
 
 fn main() -> io::Result<()> {
-    let index = match File::open("index.json") {
-        Ok(f) => {
-            eprintln!("Using index from file");
-            serde_json::from_reader::<_, Index>(BufReader::new(f)).expect("Cannot read index file")
-        }
-        Err(_) => {
-            eprintln!("Computing index...");
-            let path = std::env::args().nth(1).unwrap_or_else(|| ".".into());
-            let index = Index::new(path);
-            let f = File::create("index.json")?;
-            serde_json::to_writer(BufWriter::new(f), &index).expect("Cannot write index file");
-            index
-        }
-    };
+    let options = Options::parse();
 
-    for (p, s) in index.search("buffer texture").into_iter().take(10) {
-        println!("{path}: {s}", path = p.display());
+    match options.command {
+        Command::Build {
+            ref directory,
+            force,
+        } => {
+            if force || !file_exists(&options.index_file)? {
+                eprintln!("Computing index for {directory}...");
+                let index = Index::new(directory);
+                let f = File::create(&options.index_file)?;
+                index.save(BufWriter::new(f))?;
+                eprintln!("Saved index at {path}", path = &options.index_file);
+            } else {
+                eprintln!("Index already exists");
+            }
+        }
+        Command::Search { count, ref query } => {
+            let index = Index::load(BufReader::new(File::open(&options.index_file)?))?;
+            let results = index.search(query);
+            if results.is_empty() {
+                println!("No match for query {query:?}");
+            }
+            for (p, s) in results.into_iter().take(count) {
+                println!("{path}: {s}", path = p.display());
+            }
+        }
     }
 
     Ok(())
