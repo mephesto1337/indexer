@@ -2,6 +2,7 @@ use std::{
     fs::{metadata, File},
     io::{self, BufReader, BufWriter},
     path::Path,
+    time::SystemTime,
 };
 
 use clap::{Parser, Subcommand};
@@ -46,6 +47,9 @@ enum Command {
         /// Query
         query: String,
     },
+
+    /// Checks that files references in index file are up to date
+    Check,
 }
 
 fn file_exists(path: impl AsRef<Path>) -> io::Result<bool> {
@@ -78,7 +82,13 @@ fn file_exists(path: impl AsRef<Path>) -> io::Result<bool> {
     }
 }
 
+fn get_last_modified_time(path: impl AsRef<Path>) -> io::Result<SystemTime> {
+    let m = metadata(path)?;
+    m.modified()
+}
+
 fn main() -> io::Result<()> {
+    env_logger::init();
     let options = Options::parse();
 
     match options.command {
@@ -87,13 +97,13 @@ fn main() -> io::Result<()> {
             force,
         } => {
             if force || !file_exists(&options.index_file)? {
-                eprintln!("Computing index for {directory}...");
+                log::info!("Computing index for {directory}...");
                 let index = Index::new(directory);
                 let f = File::create(&options.index_file)?;
                 index.save(BufWriter::new(f))?;
-                eprintln!("Saved index at {path}", path = &options.index_file);
+                log::info!("Saved index at {path}", path = &options.index_file);
             } else {
-                eprintln!("Index already exists");
+                log::warn!("Index already exists");
             }
         }
         Command::Search { count, ref query } => {
@@ -104,6 +114,20 @@ fn main() -> io::Result<()> {
             }
             for (p, s) in results.into_iter().take(count) {
                 println!("{path}: {s}", path = p.display());
+            }
+        }
+        Command::Check => {
+            let index_time = get_last_modified_time(&options.index_file)?;
+            let index = Index::load(BufReader::new(File::open(&options.index_file)?))?;
+            let (filename, mtime) = index.last_modified_file()?;
+            if index_time >= mtime {
+                println!("Index file {f} is up to date", f = &options.index_file);
+            } else {
+                println!(
+                    "{filename} is newer than index file ({f})",
+                    f = &options.index_file,
+                    filename = filename.display()
+                );
             }
         }
     }

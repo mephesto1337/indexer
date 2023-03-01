@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    fs::{read_dir, File},
+    fs::{metadata, read_dir, File},
     io::{self, BufReader},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,7 @@ fn traverse_tree(p: impl AsRef<Path>, mut callback: impl FnMut(PathBuf)) {
         let rd = match read_dir(&p) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("ERROR: cannot read {path}: {e}", path = p.display());
+                log::error!("cannot read {path}: {e}", path = p.display());
                 continue;
             }
         };
@@ -30,15 +31,15 @@ fn traverse_tree(p: impl AsRef<Path>, mut callback: impl FnMut(PathBuf)) {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("ERROR: cannot process entry: {e}");
+                    log::error!("cannot process entry: {e}");
                     continue;
                 }
             };
             let ft = match entry.file_type() {
                 Ok(ft) => ft,
                 Err(e) => {
-                    eprintln!(
-                        "ERROR: cannot get filetype for {path}: {e}",
+                    log::error!(
+                        "cannot get filetype for {path}: {e}",
                         path = entry.path().display()
                     );
                     continue;
@@ -100,11 +101,11 @@ macro_rules! apply_tokenizer {
         let p = $path;
         match Document::build(&p, tokenizer) {
             Ok(d) => {
-                eprintln!("INFO: processed {path}", path = p.display());
+                log::info!("processed {path}", path = p.display());
                 $index.documents.insert(p, d);
             }
             Err(e) => {
-                eprintln!("ERROR: processing {path}: {e}", path = p.display());
+                log::error!("processing {path}: {e}", path = p.display());
             }
         }
     }};
@@ -120,10 +121,11 @@ impl Index {
             Some("text") | Some("txt") => apply_tokenizer!(TextTokenizer::default(), p, index),
             Some("rs") => apply_tokenizer!(TextTokenizer::default(), p, index),
             Some(ext) => {
-                eprintln!("No handler for {ext:?} documents");
+                log::warn!("No handler for {ext:?} documents, falling back to text");
+                apply_tokenizer!(TextTokenizer::default(), p, index)
             }
             None => {
-                eprintln!("Unknown document type {path}", path = p.display());
+                log::error!("Unknown document type {path}", path = p.display());
             }
         });
         index
@@ -170,5 +172,25 @@ impl Index {
     pub fn save<W: io::Write>(&self, writer: W) -> io::Result<()> {
         serde_json::to_writer(writer, self)
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
+    }
+
+    pub fn last_modified_file(&self) -> io::Result<(&Path, SystemTime)> {
+        let mut mtime = UNIX_EPOCH;
+        let mut filename = None;
+        for f in self.documents.keys() {
+            let m = metadata(f)?.modified()?;
+            if m > mtime {
+                filename = Some(f.as_path());
+                mtime = m;
+            }
+        }
+        if let Some(filename) = filename {
+            Ok((filename, mtime))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Index does not contains any file",
+            ))
+        }
     }
 }
